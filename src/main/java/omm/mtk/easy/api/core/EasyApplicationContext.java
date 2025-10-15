@@ -35,6 +35,10 @@ public class EasyApplicationContext {
         scannedClasses.forEach(clazz -> System.out.println("   📍 " + clazz.getName()));
         
         initializeBeans();
+        // DEBUG: Afficher les beans créés
+        System.out.println("📊 Beans initialized: " + beans.size());
+        beans.forEach((name, bean) -> System.out.println("   🟢 " + name + " -> " + bean.getClass().getName()));
+        
         buildInterfaceMapping();
         injectDependencies();
         bindConfigurationProperties();
@@ -77,16 +81,24 @@ public class EasyApplicationContext {
     private void initializeBeans() {
         System.out.println("🔧 Initializing beans...");
         
+        // D'abord les configurations
         scannedClasses.stream()
                 .filter(clazz -> clazz.isAnnotationPresent(Configuration.class))
                 .forEach(this::createConfigurationBean);
         
-        // Ensuite les autres composants - EXCLURE LES ANNOTATIONS
-        scannedClasses.stream()
+        // Ensuite les autres composants
+        List<Class<?>> componentClasses = scannedClasses.stream()
                 .filter(clazz -> isComponent(clazz) &&
                         !clazz.isAnnotationPresent(Configuration.class) &&
-                        !clazz.isAnnotation()) // ✅ EXCLURE LES ANNOTATIONS
-                .forEach(this::createBean);
+                        !clazz.isAnnotation())
+                .collect(Collectors.toList());
+        
+        System.out.println("📋 Components to initialize: " + componentClasses.size());
+        componentClasses.forEach(clazz -> System.out.println("   🏗️ " + clazz.getName() +
+                (clazz.getInterfaces().length > 0 ? " (implements: " +
+                        Arrays.stream(clazz.getInterfaces()).map(Class::getSimpleName).collect(Collectors.joining(", ")) + ")" : "")));
+        
+        componentClasses.forEach(this::createBean);
     }
     
     private void buildInterfaceMapping() {
@@ -94,16 +106,26 @@ public class EasyApplicationContext {
         
         Map<Class<?>, List<Object>> interfaceImplementations = new HashMap<>();
         
-        // Collecter toutes les implémentations d'interfaces
-        for (Object beanInstance : beansByType.values()) {
+        // Parcourir tous les beans enregistrés
+        for (Map.Entry<String, Object> beanEntry : beans.entrySet()) {
+            Object beanInstance = beanEntry.getValue();
             Class<?> beanClass = beanInstance.getClass();
             
-            for (Class<?> interfaceClass : beanClass.getInterfaces()) {
+            System.out.println("  🔍 Analyzing bean: " + beanClass.getName());
+            
+            // Obtenir toutes les interfaces implémentées (méthode améliorée)
+            Set<Class<?>> interfaces = getAllInterfaces(beanClass);
+            
+            if (!interfaces.isEmpty()) {
+                System.out.println("    📍 Implements interfaces: " + interfaces.stream()
+                        .map(Class::getSimpleName)
+                        .collect(Collectors.joining(", ")));
+            }
+            
+            for (Class<?> interfaceClass : interfaces) {
                 interfaceImplementations
-                        .computeIfAbsent(interfaceClass, k -> new ArrayList<>(2)) // Optimisé pour 1-2 implémentations
+                        .computeIfAbsent(interfaceClass, k -> new ArrayList<>())
                         .add(beanInstance);
-                
-                System.out.println("  📍 " + interfaceClass.getSimpleName() + " <- " + beanClass.getSimpleName());
             }
         }
         
@@ -112,27 +134,48 @@ public class EasyApplicationContext {
             Class<?> interfaceClass = entry.getKey();
             List<Object> implementations = entry.getValue();
             
+            System.out.println("  🔧 Resolving " + interfaceClass.getSimpleName() + " -> " + implementations.size() + " implementations");
+            
             if (implementations.size() == 1) {
                 beansByInterface.put(interfaceClass, implementations.get(0));
-                System.out.println("  ✅ Single implementation: " + interfaceClass.getSimpleName());
+                System.out.println("    ✅ Single implementation: " + interfaceClass.getSimpleName() + " -> " + implementations.get(0).getClass().getSimpleName());
             } else {
                 Object primaryImpl = findPrimaryImplementation(implementations);
                 if (primaryImpl != null) {
                     beansByInterface.put(interfaceClass, primaryImpl);
-                    System.out.println("  🏆 Using @Primary: " + interfaceClass.getSimpleName());
+                    System.out.println("    🏆 Using @Primary: " + interfaceClass.getSimpleName() + " -> " + primaryImpl.getClass().getSimpleName());
                 } else {
-                    String implNames = implementations.stream()
-                            .map(impl -> impl.getClass().getSimpleName())
-                            .collect(Collectors.joining(", "));
-                    throw new RuntimeException(
-                            "Multiple implementations for " + interfaceClass.getName() +
-                                    ": " + implNames + ". Use @Primary or @Qualifier."
-                    );
+                    // Pour le moment, on prend le premier et on log un warning
+                    beansByInterface.put(interfaceClass, implementations.get(0));
+                    System.out.println("    ⚠️ Multiple implementations for " + interfaceClass.getSimpleName() + ", using first: " + implementations.get(0).getClass().getSimpleName());
                 }
             }
         }
         
-        System.out.println("✅ Interface mapping: " + beansByInterface.size() + " interfaces");
+        System.out.println("✅ Interface mapping completed: " + beansByInterface.size() + " interfaces mapped");
+        if (!beansByInterface.isEmpty()) {
+            beansByInterface.forEach((iface, impl) ->
+                    System.out.println("   🔗 " + iface.getSimpleName() + " -> " + impl.getClass().getSimpleName()));
+        }
+    }
+    
+    private Set<Class<?>> getAllInterfaces(Class<?> clazz) {
+        Set<Class<?>> interfaces = new HashSet<>();
+        Class<?> current = clazz;
+        
+        while (current != null && current != Object.class) {
+            // Ajouter les interfaces directes
+            interfaces.addAll(Arrays.asList(current.getInterfaces()));
+            
+            // Pour chaque interface, ajouter aussi ses interfaces parentes
+            for (Class<?> iface : current.getInterfaces()) {
+                interfaces.addAll(getAllInterfaces(iface));
+            }
+            
+            current = current.getSuperclass();
+        }
+        
+        return interfaces;
     }
     
     private Object findPrimaryImplementation(List<Object> implementations) {
@@ -195,6 +238,7 @@ public class EasyApplicationContext {
         System.out.println("  ✅ Registered: " + clazz.getSimpleName() + " as '" + beanName + "'");
     }
     
+    
     private Object createBeanInstance(Class<?> clazz) throws Exception {
         Constructor<?>[] constructors = clazz.getConstructors();
         
@@ -241,30 +285,68 @@ public class EasyApplicationContext {
                 })
                 .toArray();
     }
-    
     private Object findBeanForInjection(Class<?> type, String qualifierName) {
+        System.out.println("🔍 [INJECTION] Looking for: " + type.getName() +
+                (qualifierName != null ? " (qualifier: " + qualifierName + ")" : ""));
+        
         // 1. Qualifier
         if (qualifierName != null && !qualifierName.isEmpty()) {
             Object bean = beans.get(qualifierName);
             if (bean != null && type.isAssignableFrom(bean.getClass())) {
+                System.out.println("  ✅ Found by qualifier: " + qualifierName);
                 return bean;
             }
         }
         
-        // 2. Type exact
+        // 2. Type exact dans beansByType
         Object bean = beansByType.get(type);
-        if (bean != null) return bean;
+        if (bean != null) {
+            System.out.println("  ✅ Found by exact type in beansByType: " + type.getName());
+            return bean;
+        }
         
-        // 3. Interface
+        // 3. Interface dans beansByInterface
         bean = beansByInterface.get(type);
-        if (bean != null) return bean;
+        if (bean != null) {
+            System.out.println("  ✅ Found by interface in beansByInterface: " + type.getName());
+            return bean;
+        }
         
-        // 4. Assignabilité
-        return beansByType.entrySet().stream()
+        // 4. Fallback direct: recherche manuelle dans tous les beans
+        if (type.isInterface()) {
+            System.out.println("  🔄 Fallback: searching for interface implementation in all beans");
+            for (Object beanInstance : beans.values()) {
+                if (type.isAssignableFrom(beanInstance.getClass())) {
+                    System.out.println("  ✅ Found by fallback search: " + type.getName() + " -> " + beanInstance.getClass().getSimpleName());
+                    // Mettre en cache pour les prochaines fois
+                    beansByInterface.put(type, beanInstance);
+                    return beanInstance;
+                }
+            }
+        }
+        
+        // 5. Recherche par assignabilité dans beansByType
+        bean = beansByType.entrySet().stream()
                 .filter(entry -> type.isAssignableFrom(entry.getKey()))
                 .map(Map.Entry::getValue)
                 .findFirst()
                 .orElse(null);
+        
+        if (bean != null) {
+            System.out.println("  ✅ Found by assignability in beansByType: " + type.getName());
+            return bean;
+        }
+        
+        System.out.println("❌ [INJECTION] No bean found for: " + type.getName());
+        System.out.println("   Available beans: " + beans.keySet());
+        System.out.println("   Available beansByType: " + beansByType.keySet().stream()
+                .map(Class::getSimpleName)
+                .collect(Collectors.joining(", ")));
+        System.out.println("   Available beansByInterface: " + beansByInterface.keySet().stream()
+                .map(Class::getSimpleName)
+                .collect(Collectors.joining(", ")));
+        
+        return null;
     }
     
     private void injectDependencies() {
